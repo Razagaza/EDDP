@@ -75,7 +75,7 @@ source ~/.bashrc
 
 ```bash
 # CASTEP-25.11.tar.gz 파일 업로드하고 진행
-cd && tar -xzvf CASTEP-25.11.tar
+cd && tar -xzvf CASTEP-25.11.tar.gz
 echo 'module load intel/19.0.5 impi/19.0.5' >> ~/.bashrc
 echo 'export CASTEP=$HOME/CASTEP-25.11' >> ~/.bashrc
 echo 'export PATH=$CASTEP/bin:$CASTEP/bin/linux_x86_64_ifort--serial:$CASTEP/obj/linux_x86_64_ifort--mpi:$PATH'  >> ~/.bashrc
