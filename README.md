@@ -82,16 +82,11 @@ source ~/.bashrc
 ```
 
 ## ddp-batch 설치
-
 ```bash
-# 모듈 로드
-module load eddp
-
-# 저장소 클론 및 설치
-git clone https://github.com/SehunJoo/ddp-batch.git && cd ddp-batch
-cd bin && update-chain  # script 에러 이슈 존재
-
-# path 환경변수에 경로 추가 필요
+# ddp-batch.tar 파일 업로드하고 진행
+cd && tar -xvf ddp-batch.tar
+echo 'export PATH=$HOME/ddp-batch/bin:$PATH' >> ~/.bashrc
+source ~/.bashrc
 ```
 
 # 소프트웨어 설치 가이드 (User Local Installation)
