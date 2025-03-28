@@ -1,0 +1,755 @@
+#!/bin/bash
+
+#==================================================================================#
+#                                 spawn-batch                                      #
+#==================================================================================#
+#                                                                                  #
+# This file is part of the ddp-batch package.                                      #
+#                                                                                  #
+# ddp-batch is free software; you can redistribute it and/or                       #
+# modify it under the terms of the GNU General Public License version 2            #
+# as published by the Free Software Foundation                                     #
+#                                                                                  #
+# This program is distributed in the hope that it will be useful,                  #
+# but WITHOUT ANY WARRANTY; without even the implied warranty of                   #
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the                    #
+# GNU General Public License for more details.                                     #
+#                                                                                  #
+# You should have received a copy of the GNU General Public License                #
+# along with this program; if not, write to the Free Software                      #
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.  #
+#                                                                                  #
+#----------------------------------------------------------------------------------#
+# This program manages AIRSS and EDDP jobs                                         #
+#----------------------------------------------------------------------------------#
+# Written by Se Hun Joo, Pascal T. Salzbrenner, Copyright (c) 2024                 #
+#----------------------------------------------------------------------------------#
+#                                                                                  #
+#==================================================================================#
+
+set -e
+
+# Check input parameters
+
+function usage {
+    echo 1>&2
+    echo 1>&2 "usage: $(basename $0)  [-despawn] [-command commandline]"
+    echo 1>&2
+    echo 1>&2 '    [OPTION]                     [DESCRIPTION]'
+    echo 1>&2
+    echo 1>&2 '    [-despawn]                   auto-run despawn-batch (default false)'
+    echo 1>&2
+    echo 1>&2 '    [-command  commandline]      command line for running application'
+    echo 1>&2 '                                 this option should be located at the end of command line'
+    echo 1>&2
+    exit 1
+}
+
+if [ $# -lt 1 ]; then
+    usage
+fi
+
+
+# Set defaults
+
+despawn='false'
+exec='castep.mpi'
+bakres='none'
+genjob='false'
+opt_np=1
+opt_nnodes=1
+cmdline=''
+mpinp=1
+ompnp=1
+seed=''
+max=1000000    # default $opt_max  in airss.pl
+numpot='256'   # default 
+
+args=$(echo ${@})
+# Parse arguments
+
+while [ $# -ge 1 ] ; do
+    case $1 in
+        -despawn)
+            despawn='true'; shift 1
+            ;;
+        -genjob)
+            genjob='true'; shift 1
+            ;;
+        -exec)
+            exec=$2; shift 2
+            ;;
+        -bakres)
+            bakres=$2; shift 2
+            ;;
+        -np)
+            opt_np=$2; shift 2
+            ;;
+        -nnodes)
+            opt_nnodes=$2; shift 2
+            ;;
+        -command)
+            shift 1; cmdline=$*;
+
+            # for a quoted command line (required for passing redirection, e.g., franks, flock)
+
+            [[ $# -eq 1 ]] && cmdline_quoted='true' || cmdline_quoted='false'
+
+            # parse arguments from the command line
+
+            if [[ ${cmdline_quoted} == 'true' ]]
+            then
+                program=$(echo $cmdline | awk '{print $1}' | awk 'BEGIN {FS="/"} {print $NF}' | awk 'BEGIN { FS = "." }; {print $1}')
+                [[ $(echo $cmdline | grep flock | wc -l) -eq 1 ]] && program='flock'
+                mpinp=$(echo $cmdline | sed -n 's/.*-mpinp[[:space:]]\+\([0-9]\+\).*/\1/p') # airss | crud
+                [[ -z $mpinp ]] && mpinp=1
+                ompnp=$(echo $cmdline | sed -n 's/.*-ompnp[[:space:]]\+\([0-9]\+\).*/\1/p') # forge | flock
+                [[ -z $ompnp ]] && ompnp=1
+                if [[ $(echo $cmdline | sed -n '/-repose/p' | wc -l) -eq 1 ]]; then
+                    exe='repose' # airss | crud
+                fi
+
+                shift 1
+            elif [[ ${cmdline_quoted} == 'false' ]]
+            then
+                program=$(echo $1 | awk 'BEGIN {FS="/"} {print $NF}' | awk 'BEGIN { FS = "." }; {print $1}'); shift 1
+                while [ $# -ge 1 ]; do
+                    case $1 in
+                        -mpinp)
+                            mpinp=$2; ompnp=1; shift 2 # airss | crud
+                            ;;
+                        -ompnp)
+                            ompnp=$2; mpinp=1; shift 2 # forge
+                            ;;
+                        -repose)
+                            exe='repose'; shift 1 # airss | crud
+                            ;;
+                        -seed)
+                            seed=$2; shift 2 # airss
+                            ;;
+                        -max)
+                            max=$2; shift 2 # airss
+                            ;;
+                        -numpot)
+                            numpot=$2; shift 2 # forge
+                            ;;
+                        -s)
+                            seed=$(echo $2 | awk 'BEGIN {FS="/"} {print $NF}'); shift 2 # forge
+                            ;;
+                        *)
+                            shift 1
+                            ;;
+                    esac
+                done
+            fi
+            ;;
+        -h)
+            usage
+            ;;
+	*) 
+            echo "invalid option: $1"
+            echo
+            usage
+            ;;
+    esac
+done
+
+jobscript="jobscript_${program}.sh"
+
+
+
+# Check before proceeding
+
+if ls .spawnpids* &>/dev/null; then
+    echo 'Spawn files detected - aborting ...'
+    exit 127
+fi
+
+if [[ -f STOP ]]; then
+    echo 'STOP file detected - aborting ...'
+    exit 127
+fi
+
+if [[ $(ls ./.schedopt | wc -l) -ne 1 ]]; then
+    echo "There should be .schedopt file"
+    exit 127
+fi
+
+
+
+# Read *.schedopt file and get options for scheduler
+
+optfile="./.schedopt"
+schedopt=$(cat $optfile | sed 's/##[[:print:]]*//g' | sed "/^%block ${program}/,/^%endblock ${program}/!d;//d" )
+[ -z "$schedopt" ] &&  schedopt=$(cat $optfile  | sed '/^%block default/,/^%endblock default/!d;//d')
+
+nonschedopt=$(echo "$schedopt" | sed '/^#/d')
+schedopt=$(echo "$schedopt" | sed -n '/^#/p')
+
+
+# Specify the scheduler type
+
+nopts_sge=$(echo "$schedopt" | sed -n '/^#\$/p' | wc -l)
+nopts_pbs=$(echo "$schedopt" | sed -n '/^#PBS/p' | wc -l)
+nopts_slurm=$(echo "$schedopt" | sed -n '/^#SBATCH/p' | wc -l)
+if [[ $nopts_sge -gt 0 ]]; then
+    sched='sge'
+    schedopt=$(echo "$schedopt" | sed -n '/^#\$/p')
+elif [[ $nopts_pbs -gt 0 ]]; then
+    sched='pbs'
+    schedopt=$(echo "$schedopt" | sed -n '/^#PBS/p')
+elif [[ $nopts_slurm -gt 0 ]]; then
+    sched='slurm'
+    schedopt=$(echo "$schedopt" | sed -n '/^#SBATCH/p')
+else
+    echo "sge | pbs | slurm is only available"
+    exit 127
+fi
+
+
+# Specify the amount of computational resources to request
+
+if [[ $sched == "sge" ]]
+then
+    # number of cores & nodes (requested) per each job
+
+    sched_ncores_per_job=$(echo "$schedopt" | sed -n '/ -pe /p' | awk '{print $4}')
+    sched_ncores_per_node=$(echo "$nonschedopt" | grep 'ncores_per_node' | awk 'BEGIN {FS="="} {print $2}' | awk '{print $1}')
+    sched_nnodes_per_job=$(echo "$sched_ncores_per_job/$sched_ncores_per_node" | bc)
+
+    # number of jobs (requested)
+
+    sched_njobs_per_array=$(echo "$schedopt" | sed -n '/ -t /p' | awk '{print $3}' | awk 'BEGIN {FS="-"} {print $2}')
+    sched_nnodes_per_array=$(echo "$sched_nnodes_per_job * $sched_njobs_per_array" | bc)
+    sched_ncores_per_array=$(echo "$sched_ncores_per_job * $sched_njobs_per_array" | bc)
+
+elif [[ $sched == "pbs" ]]
+then
+    # number of cores & nodes (requested) per each job
+	
+    select_line=$(echo "$schedopt" | grep -E '^#PBS.*-l.*select=')
+    select_info=$(echo "$select_line" | sed -n 's/.*select=\([0-9]*\):ncpus=\([0-9]*\).*/\1 \2/p')
+    sched_nnodes_per_job=$(echo "$select_info" | awk '{print $1}')
+    sched_ncores_per_node=$(echo "$select_info" | awk '{print $2}')
+    sched_ncores_per_job=$(echo "$sched_nnodes_per_job * $sched_ncores_per_node" | bc)
+
+    # number of jobs (requested)
+    
+	if echo "$schedopt" | grep -q '^#PBS.*-J'; then
+		sched_njobs_per_array=$(echo "$schedopt" | sed -n '/ -J /p' | awk '{print $3}' | awk 'BEGIN {FS="-"} {print $2}')
+	else
+		sched_njobs_per_array=1
+    sched_nnodes_per_array=$(echo "$sched_nnodes_per_job * $sched_njobs_per_array" | bc)
+    sched_ncores_per_array=$(echo "$sched_ncores_per_job * $sched_njobs_per_array" | bc)
+elif [[ $sched == "slurm" ]]
+then
+    # number of cores & nodes (requested) per each job
+
+    sched_ncores_per_node=$(echo "$nonschedopt" | grep 'ncores_per_node' | awk 'BEGIN {FS="="} {print $2}' | awk '{print $1}')
+    sched_nnodes_per_job=$(echo "$schedopt" | sed -n '/--nodes/p' | awk 'BEGIN {FS="--nodes="} {print $2}')
+    sched_ncores_per_job=$(echo "$sched_ncores_per_node*$sched_nnodes_per_job" | bc)
+
+    # number of jobs (requested)
+
+    sched_njobs_per_array=$(echo "$schedopt" | sed -n '/--array/p' | awk 'BEGIN {FS="--array="} {print $2}' | awk 'BEGIN {FS="-"} {print $2}')
+    sched_nnodes_per_array=$(echo "$sched_nnodes_per_job * $sched_njobs_per_array" | bc)
+    sched_ncores_per_array=$(echo "$sched_ncores_per_job * $sched_njobs_per_array" | bc)
+fi
+
+
+# actual size of subjobs
+
+cmd_np=$((mpinp * ompnp))
+[[ $program == 'franks' ]] && cmd_np=$sched_ncores_per_node
+[[ $program == 'flock' ]] && cmd_np=$sched_ncores_per_node
+cmd_nnodes=$(((cmd_np - 1) / sched_ncores_per_node + 1))
+
+ncores_per_instance=$((opt_np > cmd_np ? opt_np : cmd_np))
+nnodes_per_instance=$((opt_nnodes > cmd_nnodes ? opt_nnodes : cmd_nnodes))
+ncores_per_instance_per_node=$(((ncores_per_instance + nnodes_per_instance - 1) / nnodes_per_instance))
+
+mem_per_core=$(echo "$nonschedopt" | grep 'mem_per_core' | awk 'BEGIN {FS="="} {print $2}' | awk '{print $1}')
+mem_per_instance=$((mem_per_core * ncores_per_instance_per_node))
+
+# Specify how to distribute subjobs
+
+if [[ $nnodes_per_instance -eq 1 ]]; then
+
+    # single-node calculation
+
+    ninstances_per_node=$(echo "$sched_ncores_per_node / $ncores_per_instance" | bc)
+    ninstances_per_job=$(echo "$sched_nnodes_per_job * $ninstances_per_node" | bc)
+
+elif [[ $nnodes_per_instance -gt 1 ]]; then
+
+    # multi-node calculation
+
+    ninstances_per_node="1"
+    ninstances_per_job=$(echo "$sched_nnodes_per_job / $nnodes_per_instance" | bc)
+fi
+ninstances_per_array=$(echo "$sched_njobs_per_array * $ninstances_per_job" | bc)
+
+
+echo
+echo
+echo '    .dP"Y8 88""Yb    db    Yb        dP 88b 88          88""Yb    db    888888  dP""b8 88  88'
+echo '    `Ybo." 88__dP   dPYb    Yb  db  dP  88Yb88 ________ 88__dP   dPYb     88   dP   `" 88  88'
+echo '    o.`Y8b 88"""   dP__Yb    YbdPYbdP   88 Y88 """""""" 88""Yb  dP__Yb    88   Yb      888888'
+echo "    8bodP' 88     dP''''Yb    YP  YP    88  Y8          88oodP dP''''Yb   88    YboodP 88  88"
+echo 
+echo
+echo '    Automated generation of jobscript & automated job submission'
+echo '    for batch queuing system'
+echo
+echo '    Summary of parameters - '
+echo
+echo "      command       : $cmdline"
+echo "      program       : $program"
+echo "      seed          : $seed"
+echo "      despawn       : $despawn"
+[[ $program == "airss" ]] && echo "      max           : $max"
+[[ $program == "forge" ]] && echo "      numpot        : $numpot"
+echo
+echo "      * Information on HPC hardware and scheduler"
+echo "      jobscript     : $jobscript"
+echo "      scheduler     : $sched"
+echo "      cores         : $sched_ncores_per_node /node"
+echo
+echo "      * The amount of computational resources to request"
+echo "      cores         : $sched_ncores_per_job /job"
+echo "      nodes         : $sched_nnodes_per_job /job"
+echo "      jobs          : $sched_njobs_per_array /array"
+echo "      cores         : $sched_ncores_per_array /array"
+echo "      nodes         : $sched_nnodes_per_array /array"
+echo
+echo "      * The size of each subjob"
+echo "      nodes         : $nnodes_per_instance /subjob"
+echo "      cores         : $ncores_per_instance /subjob"
+echo "                    : $ncores_per_instance_per_node /subjob/node"
+echo "      mpinp         : $mpinp /subjob"
+echo "      ompnp         : $ompnp /subjob"
+echo "      memory        : ${mem_per_core}M/core"
+echo 
+echo "      * The distirbution of subjobs"
+echo "      subjobs       : $ninstances_per_node /node"
+echo "                    : $ninstances_per_job /job"
+echo "                    : $ninstances_per_array /array"
+if [[ $np -lt $ncores_per_instance ]]; then
+echo "      underpopulate : $np_per_node /node out of $ncores_per_instance_per_node /node" 
+echo
+echo
+echo "    called as ( "${0##*/}" "$args" ) &>> spawn-batch.out &"
+fi
+
+
+# Check before proceeding
+
+if [[ $nnodes_per_instance -gt $sched_nnodes_per_job ]]; then
+    echo "Warning: number of nodes for a subjob should be equal or less than number of nodes requested for a job"
+    echo "number of nodes (/job)    : $sched_nnodes_per_job"
+    echo "number of nodes (/subjob) : $nnodes_per_instance"
+    exit 127
+fi
+
+if (( sched_nnodes_per_job % nnodes_per_instance != 0 )); then
+  echo "$sched_nnodes_per_job does not divide evenly by $nnodes_per_instance."
+fi
+
+if [[ $ncores_per_instance_per_node -gt $sched_ncores_per_node ]]; then
+    echo "Warning: number of cores per node for a subjob should be equal or less than the number of cores per node"
+    echo "number of cores (/node)        : $sched_ncores_per_node"
+    echo "number of cores (/subjob/node) : $ncores_per_instance_per_node"
+    exit 127
+fi
+
+if [[ $np_per_node -gt $ncores_per_instance_per_node ]]; then
+    echo "Warning: mpinp/ompnp per node should be equal or less than the number of cores per node for a subjob"
+    echo "mpinp/ompnp (/subjob/node)     : $np_per_node"
+    echo "number of cores (/subjob/node) : $ncores_per_instance_per_node"
+    exit 127
+fi
+
+if [[ $mpinp -gt 1 ]] && [[ $ompnp -gt 1 ]]; then
+    echo "Warning: hybrid MPI/OpenMP job is not supported"
+    exit 127
+fi
+
+if [[ $ompnp -gt 1 ]] && [[ $nnodes_per_instance -gt 1 ]]; then
+    echo "Warning: OpenMP job cannot be parallized over multiple nodes"
+    exit 127
+fi
+    
+
+## Generate batch script to run an MPI parallel array job under Sun Grid Engine (SGE) batch queuing system
+
+function genjob {
+    
+    echo '    generating jobscript ...'
+    
+    # job script - scheduler options
+
+    (
+        echo "#!/bin/bash -l"
+        echo
+        if [[ $sched == 'slurm' ]] && [[ $ompnp -gt 1 ]]
+        then    
+            echo "${schedopt}"
+            #echo "${schedopt}" \
+            #| sed "s/--cpus-per-task[[:print:]]*/--cpus-per-task=${ompnp}/" \
+            #| sed "s/--tasks-per-node=[[:print:]]*/--tasks-per-node=${ninstances_per_node}/"
+        elif [[ $sched == 'pbs' ]]; then
+            echo "${schedopt}"
+            echo 'cd "$PBS_O_WORKDIR"'
+        else
+           echo "${schedopt}"
+        fi
+        echo
+    ) > $jobscript
+
+    # job script - environment variables & variables
+    # at runtime, archer2 jobs do not have access to the home directory, but we require the .bashrc
+    # copy it into the run directory
+    cp ~/.bashrc ./
+    (
+        echo '# --------------------------------------------------'
+        echo
+        echo 'source ./.bashrc'
+        echo '[[ -f ./.spawnrc ]] && source ./.spawnrc'
+        echo 
+        echo '# set variables'
+        echo 
+        if [[ $sched == "sge" ]]
+        then
+            echo 'workdir="${SGE_O_WORKDIR}"'
+            echo 'jobid="${JOB_ID}"'
+            echo 'taskid="${SGE_TASK_ID}"'
+		elif [[ $sched == "pbs" ]]
+        then
+            echo 'workdir="${PBS_O_WORKDIR}"'
+            echo 'jobid=$(echo "$PBS_JOBID" | sed -E "s/\[[0-9]+\]/[]/" | cut -d. -f1)'
+            echo 'taskid=$(echo "$PBS_JOBID" | grep -oP "(?<=\[)[0-9]+(?=\])" || echo "1")'
+        elif [[ $sched == "slurm" ]]
+        then
+            echo 'workdir="${SLURM_SUBMIT_DIR}"'
+            echo 'jobid="${SLURM_ARRAY_JOB_ID}"'
+            echo 'taskid="${SLURM_ARRAY_TASK_ID}"'
+        fi
+        echo 'jids="${jobid}.${taskid}"'
+        echo 'prefix=".spawnpids"'
+        echo
+        echo "program='${program}'"
+        echo "mpinp='${mpinp}'"
+        echo "export OMP_NUM_THREADS=${ompnp}"
+        if [[ $ompnp -gt 1 ]]; then
+            echo "export OMP_PLACES=cores"
+        fi
+        
+        if [[ $program == "airss" ]] || [[ $program = "forge" ]]; then
+            echo "seed='${seed}'"
+        fi
+        echo
+    ) >> $jobscript
+
+    # job script - run application
+
+    (
+        echo '# launch program'
+        echo
+        echo '(echo; top -b -n 1 -u $USER; echo) >> top.txt'
+        echo
+        echo '# loop over the nodes assigned to the job'
+
+        if [[ $sched == 'slurm' ]]
+        then
+            echo 'nodelist=$(scontrol show hostnames $SLURM_JOB_NODELIST)'
+		    echo 'templist=($nodelist)'
+
+            echo "for (( ni=0; ni<${sched_nnodes_per_job}; ni+=${nnodes_per_instance} ))"
+            echo 'do'
+		    echo '    nodeid=""'
+		    echo '    tempid=""'
+		    echo '    for nj in `seq 1' ${nnodes_per_instance}'`'
+            echo '    do'
+		    echo '        index=$(( ni + nj - 1 ))'
+		    echo '        tempid+="${templist[index]},"'
+            echo '    done'
+		    echo '    nodeid=${tempid%,*}'
+            echo
+		elif [[ $sched == 'pbs' ]]
+		then
+			echo 'nodelist=$(cat $PBS_NODEFILE | uniq)'
+			echo 'templist=($nodelist)'
+
+			echo "for (( ni=0; ni<${sched_nnodes_per_job}; ni+=${nnodes_per_instance} ))"
+			echo 'do'
+			echo '    nodeid=""'
+			echo '    tempid=""'
+			echo '    for nj in `seq 1' ${nnodes_per_instance}'`'
+			echo '    do'
+			echo '        index=$(( ni + nj - 1 ))'
+			echo '        tempid+="${templist[index]},"'
+			echo '    done'
+			echo '    nodeid=${tempid%,*}'
+			echo
+        elif [[ $sched == 'sge' ]]
+        then
+            echo "for (( ni=0; ni<${sched_nnodes_per_job}; ni+=${nnodes_per_instance} ))"
+            echo 'do'
+            echo '    nodeid=""'
+            echo '    nodeid=$(( ni + 1 ))'
+        fi
+		
+		echo '    # loop over subjobs on each node'
+		echo "    for (( i=1; i<=${ninstances_per_node}; i++ ))"
+		echo '    do'
+		echo '        sleep 0.1'
+
+        # command lines for application
+
+        # airss & crud - castep
+        if [[ $program == 'airss' || $program == 'crud' ]] && [[ $exe == 'castep' ]]; then
+
+            [[ $sched == 'sge' ]] && launcher='mpirun -np '
+			[[ $sched == 'pbs' ]] && launcher='mpirun -np '
+            [[ $sched == 'slurm' ]] && launcher='srun --nodelist=${nodeid} --exact --nodes='"${nnodes_per_instance}"' --cpus-per-task=1 --mem='"${mem_per_instance}"'M  --ntasks-per-node='"${ncores_per_instance_per_node}"'  --ntasks='
+
+            echo "        ${cmdline}"' \'
+            echo '            -launch "'${launcher}'" \'
+            echo "            -exec "'${exec}'" &"
+
+        # airss & crud - repose
+        elif [[ $program == 'airss' || $program == 'crud' ]] && [[ $exe == 'repose' ]]; then
+
+            [[ $sched == 'sge' ]] && launcher=''
+			[[ $sched == 'pbs' ]] && launcher='mpirun -np '"${ncores_per_instance}"
+			[[ $sched == 'slurm' ]] && launcher='srun --nodelist=${nodeid} --exact --nodes=1 --ntasks=1 --ntasks-per-node=1 --cpus-per-task='"${ncores_per_instance}"' --mem='"${mem_per_instance}"'M'
+
+            echo "        ${launcher}"' \'
+            echo "        ${cmdline} &"
+
+        # forge - OpenMP
+        elif [[ $program == 'forge' ]]; then
+
+            [[ $sched == 'sge' ]] && launcher=''
+		    [[ $sched == 'pbs' ]] && launcher='mpirun -np '"${ncores_per_instance}"
+            [[ $sched == 'slurm' ]] && launcher='srun --nodelist=${nodeid} --exact --hint=nomultithread --distribution=block:block --nodes=1 --ntasks=1 --ntasks-per-node=1 --cpus-per-task='"${ncores_per_instance}"
+
+            echo "        ${launcher}"' \'
+            echo "        ${cmdline}"'.${jids}.${nodeid}.${i}  < /dev/null \'
+            echo '                                 > ${seed}/${seed}.${jids}.${nodeid}.${i}.out \'
+            echo '                                2> ${seed}/${seed}.${jids}.${nodeid}.${i}.err &'
+
+        # flock - OpenMP
+        elif [[ $program == 'flock' ]]; then
+
+            [[ $sched == 'sge' ]] && launcher=''
+		    [[ $sched == 'pbs' ]] && launcher='mpirun -np '"${ncores_per_instance}"
+            [[ $sched == 'slurm' ]] && launcher='srun --nodelist=${nodeid} --exact --hint=nomultithread --distribution=block:block --nodes=1 --ntasks=1 --ntasks-per-node=1 --cpus-per-task='"${ncores_per_instance}"
+
+            echo "        ${launcher}"' \'
+            echo "        ${cmdline} &"
+
+        # franks - GNU-parallel
+        elif [[ $program == 'franks' ]]; then
+
+            echo "        ${cmdline} &"
+
+        # others
+        else
+            echo "        ${cmdline} < /dev/null >& /dev/null &"
+        fi
+
+        echo ''
+        echo '        echo "instance: ${jids} ${nodeid} ${i} $(date +%Y-%m-%d\ %H:%M:%S)"  >> ${prefix}.${jobid}'
+        echo '    done'
+        echo 'done'
+        echo
+        echo '(echo; top -b -n 1 -u $USER; echo) >> top.txt'
+        echo 'sleep 10'
+        echo '(echo; top -b -n 1 -u $USER; echo) >> top.txt'
+        echo 'sleep 60'
+        echo '(echo; top -b -n 1 -u $USER; echo) >> top.txt'
+        echo
+        echo 'wait'
+        echo 'sleep 5'
+        echo
+    ) >> $jobscript
+
+    # job script - monitor jobs
+    
+    if [[ $program == "airss" ]] || [[ $program == "crud" ]] || [[ $program == "forge" ]]; then
+        echo >> $jobscript
+    else
+        echo 'touch done.${program}' >> $jobscript
+    fi
+
+    echo 'exit 0' >> $jobscript
+}
+
+
+
+## generate despwan file
+
+function gendespawn {
+
+    echo '    generating despawn-batch ...'
+
+    # delete/cancel job
+
+    (
+        echo '#!/bin/bash'
+        echo
+        echo '# stop spawn-batch & delete/cancel job'
+        echo
+        echo "program='${program}'"
+        echo "jobid=\$(cat .spawnpids.* | grep jobid: | head -n 1 | awk '{print \$2}')"
+        echo
+        [[ $sched == 'sge'   ]] && echo '[[ ! -f done.job.${jobid} ]] && qdel ${jobid} && echo "    stopping job ${jobid} ..."'
+		[[ $sched == 'pbs'   ]] && echo '[[ ! -f done.job.${jobid} ]] && qdel ${jobid} && echo "    stopping job ${jobid} ..."'
+        [[ $sched == 'slurm' ]] && echo '[[ ! -f done.job.${jobid} ]] && scancel ${jobid} && echo "    stopping job ${jobid} ..."'
+        echo
+        echo 'touch stopspawn stopmonitor'
+        echo
+        echo 'sleep 10'
+        echo
+        echo '[[ -f status.${program} ]] && (echo; cat status.${program}; echo)'
+        echo
+        echo 'for spawnfile in .spawnpids.*'
+        echo 'do'
+        echo '    echo "end_time:           $(date +%Y-%m-%d\ %H:%M:%S)"  >> $spawnfile'
+        echo 'done'
+        echo
+        echo 'mkdir -p jobinfo'
+        echo "mv -f jobscript_*                    jobinfo 2>/dev/null"
+        echo 'mv -f .spawnpids* .fail.spawnpids*   jobinfo 2>/dev/null'
+        echo 'mv -f $program.{e,o,pe,po}${jobid}*  jobinfo 2>/dev/null'
+        echo 'mv -f slurm-*.out                    jobinfo 2>/dev/null'
+        echo 'mv -f status.*                       jobinfo 2>/dev/null'
+        echo 'mv -f done.*                         jobinfo 2>/dev/null'
+        echo
+        echo 'rm -f stopspawn stopmonitor'
+        echo 'rm -f ./.bashrc'
+        echo
+        echo 'wait'
+        echo 'echo -e "\n    despawn-batch complete: $(date)\n"'
+        echo 'exit 0'
+    ) > despawn-batch
+
+    chmod 777 despawn-batch
+}
+
+
+
+## submit jobscript
+
+function subjob {
+
+    echo '    submitting jobscript ...'
+
+    [[ $sched == 'sge' ]] && jobid=$(qsub -terse ${jobscript} | awk 'BEGIN{FS="."}; {print $1}')
+    [[ $sched == 'pbs' ]] && jobid=$(qsub "$jobscript" | cut -d. -f1)
+    [[ $sched == 'slurm' ]] && jobid=$(sbatch --parsable ${jobscript})
+
+    [[ -z $jobid ]] && echo "    job submission failed" && touch ./STOP && exit 1
+
+    (   
+        echo "program:            $program"
+        echo "command:            $cmdline"
+        echo "jobid:              $jobid"
+        echo "submit_time:        $(date +%Y-%m-%d\ %H:%M:%S)"
+    ) > .spawnpids.$jobid
+}
+
+
+
+## monitor job
+
+function monjob {
+
+    echo "    monitoring job ..."
+
+    # monitor the status of the submitted jobs
+
+    jobrunning='true'
+    success='false'
+
+    echo
+
+    monitor_job ${sched} ${jobid} &
+
+    [[ $program == "airss" ]] && monitor_airss $seed $max &
+    [[ $program == "crud" ]] && monitor_crud &
+    [[ $program == "forge" ]] && monitor_forge $seed $numpot &
+
+    until [[ $jobrunning == 'false' ]] || [[ $success == 'true' ]]
+    do
+        sleep 1
+
+        [[ -f ./done.job.${jobid} ]] && jobrunning='false'
+        [[ -f ./done.${program} ]] && success='true'
+
+        [[ -f './stopspawn' ]] && echo -e '\n    stopping spawn-batch ...' && exit 0
+        [[ -f './STOP' ]] && echo -e '\n    stopping spawn-batch ...' && ./despawn-batch && exit 0
+    done
+
+    [[ -f status.${program} ]] && (echo; cat status.${program}; echo)
+
+    # stop monitoring
+
+    touch ./stopmonitor && sleep 5 && rm -f ./stopmonitor
+
+    # check if job is completed
+
+    if [[ $success == 'true' ]]; then
+        echo -e "\n    ${program} has completed successfully"
+    elif [[ $success == 'false' ]] && [[ $jobrunning == 'false' ]]; then
+        echo -e '\n    job is terminated by wall clock limit'
+    else
+        echo -e '\n    check errors' && ./despawn-batch && exit 0
+    fi
+}
+
+
+## clean the intermediate result files before resubmitting the job
+
+function resetjob {
+
+    echo "    setting up resubmission ..."
+
+    rm -f done.job.${jobid} status.job.${jobid} .spawnpids.${jobid}
+
+    [[ $program == 'airss' ]] && reset_airss $seed
+    [[ $program == 'crud' ]] && reset_crud
+}
+
+
+################################################################################
+# Main
+################################################################################
+
+echo -e "\n    spawn-batch starting: $(date)\n"
+
+# generate jobscript
+
+genjob && gendespawn
+[[ $genjob == 'true' ]] && exit 0
+
+
+# submit jobscript
+
+until [[ $success == 'true' ]]
+do
+    subjob
+    monjob
+    [[ $success == 'false' ]] && resetjob
+done
+
+# clean job
+
+[[ $despawn == 'true' ]] && echo -e '\n    running despawn-batch ...' && ./despawn-batch
+
+wait
+
+echo -e "\n    spawn-batch complete: $(date)\n"
+
+exit 0
