@@ -239,7 +239,7 @@ then
         sched_njobs_per_array=$(echo "$schedopt" | sed -n '/ -J /p' | awk '{print $3}' | awk 'BEGIN {FS="-"} {print $2}')
     else
         sched_njobs_per_array=1
-    if
+    fi
     sched_nnodes_per_array=$(echo "$sched_nnodes_per_job * $sched_njobs_per_array" | bc)
     sched_ncores_per_array=$(echo "$sched_ncores_per_job * $sched_njobs_per_array" | bc)
 elif [[ $sched == "slurm" ]]
