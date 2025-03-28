@@ -1,0 +1,11 @@
+%block default
+#PBS -V
+#PBS -N adenosine_fe
+#PBS -q normal
+#PBS -A etc
+#PBS -l select=1:ncpus=8
+#PBS -l walltime=48:00:00
+
+ncores_per_node=8
+mem_per_core=2048
+%endblock default
