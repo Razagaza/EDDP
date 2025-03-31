@@ -1,6 +1,7 @@
 task                 : singlepoint
 xc_functional        : PBE
 spin_polarized       : true
+spin                 : 8
 fix_occupancy        : false # = smearing true (castep.mpi -s keyword / -h )
 metals_method        : dm # density mixing
 mixing_scheme        : pulay
