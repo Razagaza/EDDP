@@ -7,6 +7,6 @@
 #PBS -l walltime=48:00:00
 #PBS -J 1-50
 
-ncores_per_node=8
+ncores_per_node=24
 mem_per_core=2048
 %endblock default
