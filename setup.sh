@@ -1,19 +1,19 @@
 #/bin/bash
 
-if [[ -f ~/gcc-13.1.0.tar.gz ]]; then
+if [[ ! -f ~/gcc-13.1.0.tar.gz ]]; then
   echo "No gcc tar file"
   exit 0
 fi
-if [[ -f ~/eddp-v0.2.tgz ]]; then
+if [[ ! -f ~/eddp-v0.2.tgz ]]; then
   echo "No eddp tar file"
   exit 0
 fi
-if [[ -f ~/ddp-batch.tar ]]; then
+if [[ ! -f ~/ddp-batch.tar ]]; then
   echo "No ddo-batch tar file"
   exit 0
 fi
 
-if [[ -f ~/CASTEP-25.11.tar.gz ]]; then
+if [[ ! -f ~/CASTEP-25.11.tar.gz ]]; then
   echo "No CASTEP tar file"
   exit 0
 fi
