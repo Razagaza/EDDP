@@ -81,4 +81,3 @@ echo 'export PATH=$CASTEP/bin:$CASTEP/bin/linux_x86_64_ifort--serial:$CASTEP/obj
 module load intel/19.0.5 impi/19.0.5
 export CASTEP=$HOME/CASTEP-25.11
 export PATH=$CASTEP/bin:$CASTEP/bin/linux_x86_64_ifort--serial:$CASTEP/obj/linux_x86_64_ifort--mpi:$PATH
-~                                                                                                                         
