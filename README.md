@@ -26,7 +26,7 @@ exec option (dafualt=castep.mpi)을 추가하여 다른 소프트웨어 및 추�
 ## 2코어 사용 시 가장 빠른 시간 소요
 
 
-#NURION training test
+# NURION training test
 forge -ompnp 4 -nn 1 -n 100 -es 10 -s adenosine_fe #killed memory 부족
 forge -ompnp 4 -nn 3 -n 50 -es 10 -s adenosine_fe1 &
 forge -ompnp 4 -nn 5 -n 50 -es 10 -s adenosine_fe2 & #killed memory 부족
