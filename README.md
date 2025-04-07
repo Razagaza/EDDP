@@ -9,7 +9,7 @@ sh setup.sh
 ## PBS 스케줄러에 호환 가능한 ddp-batch 업데이트 진행 중
 ### spawn-batch maintanenece
 ```bash
-cp ~/EDDP/spawn-batch ~/ddp-batch/spawn-batch && chmod +x ~/ddp-batch/spawn-batch
+cp ~/EDDP/spawn-batch ~/ddp-batch/bin/spawn-batch && chmod +x ~/ddp-batch/bin/spawn-batch
 ```
 
 # spawn-batch PBS 버전
