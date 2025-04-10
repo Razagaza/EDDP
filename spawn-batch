@@ -1,5 +1,5 @@
 #!/bin/bash
-#ddp-batch/bin/spawn-batch
+
 #==================================================================================#
 #                                 spawn-batch                                      #
 #==================================================================================#
@@ -33,11 +33,15 @@ set -e
 
 function usage {
     echo 1>&2
-    echo 1>&2 "usage: $(basename $0)  [-despawn] [-command commandline]"
+    echo 1>&2 "usage: $(basename $0) [OPTION] [-command commandline]"
     echo 1>&2
     echo 1>&2 '    [OPTION]                     [DESCRIPTION]'
     echo 1>&2
     echo 1>&2 '    [-despawn]                   auto-run despawn-batch (default false)'
+    echo 1>&2
+    echo 1>&2 '    [-exec]                      null or "numactl -p 1 castep.mpi" for mpi at flat node'
+    echo 1>&2
+    echo 1>&2 '    [-launcher]                  null or "numactl -p 1" for omp at flat node'
     echo 1>&2
     echo 1>&2 '    [-command  commandline]      command line for running application'
     echo 1>&2 '                                 this option should be located at the end of command line'
@@ -54,6 +58,7 @@ fi
 
 despawn='false'
 exe='castep.mpi'
+launcher=''
 bakres='none'
 genjob='false'
 opt_np=1
@@ -78,6 +83,9 @@ while [ $# -ge 1 ] ; do
             ;;
         -exec)
             exe=$2; shift 2
+            ;;
+        -launcher)
+            launcher=$2; shift 2
             ;;
         -bakres)
             bakres=$2; shift 2
@@ -234,12 +242,12 @@ then
     sched_ncores_per_job=$(echo "$sched_nnodes_per_job * $sched_ncores_per_node" | bc)
 
     # number of jobs (requested)
-    
+   
     if echo "$schedopt" | grep -q '^#PBS.*-J'; then
         sched_njobs_per_array=$(echo "$schedopt" | sed -n '/ -J /p' | awk '{print $3}' | awk 'BEGIN {FS="-"} {print $2}')
     else
         sched_njobs_per_array=1
-    fi
+    fi 
     sched_nnodes_per_array=$(echo "$sched_nnodes_per_job * $sched_njobs_per_array" | bc)
     sched_ncores_per_array=$(echo "$sched_ncores_per_job * $sched_njobs_per_array" | bc)
 elif [[ $sched == "slurm" ]]
@@ -511,7 +519,7 @@ function genjob {
         if [[ $program == 'airss' || $program == 'crud' ]] && [[ $exe =~ castep ]]; then
 
             [[ $sched == 'sge' ]] && launcher='mpirun -np '
-			[[ $sched == 'pbs' ]] && launcher='mpirun -np '
+            [[ $sched == 'pbs' ]] && launcher='mpirun -np '
             [[ $sched == 'slurm' ]] && launcher='srun --nodelist=${nodeid} --exact --nodes='"${nnodes_per_instance}"' --cpus-per-task=1 --mem='"${mem_per_instance}"'M  --ntasks-per-node='"${ncores_per_instance_per_node}"'  --ntasks='
 
             echo "        ${cmdline}"' \'
@@ -521,9 +529,9 @@ function genjob {
         # airss & crud - repose
         elif [[ $program == 'airss' || $program == 'crud' ]] && [[ $exe == 'repose' ]]; then
 
-            [[ $sched == 'sge' ]] && launcher=''
-			[[ $sched == 'pbs' ]] && launcher='mpirun -np '"${ncores_per_instance}"
-			[[ $sched == 'slurm' ]] && launcher='srun --nodelist=${nodeid} --exact --nodes=1 --ntasks=1 --ntasks-per-node=1 --cpus-per-task='"${ncores_per_instance}"' --mem='"${mem_per_instance}"'M'
+            [[ $sched == 'sge' ]]
+            [[ $sched == 'pbs' ]]
+            [[ $sched == 'slurm' ]] && launcher='srun --nodelist=${nodeid} --exact --nodes=1 --ntasks=1 --ntasks-per-node=1 --cpus-per-task='"${ncores_per_instance}"' --mem='"${mem_per_instance}"'M'
 
             echo "        ${launcher}"' \'
             echo "        ${cmdline} &"
@@ -531,8 +539,8 @@ function genjob {
         # forge - OpenMP
         elif [[ $program == 'forge' ]]; then
 
-            [[ $sched == 'sge' ]] && launcher=''
-		    [[ $sched == 'pbs' ]] && launcher='mpirun -np '"${ncores_per_instance}"
+            [[ $sched == 'sge' ]]
+            [[ $sched == 'pbs' ]]
             [[ $sched == 'slurm' ]] && launcher='srun --nodelist=${nodeid} --exact --hint=nomultithread --distribution=block:block --nodes=1 --ntasks=1 --ntasks-per-node=1 --cpus-per-task='"${ncores_per_instance}"
 
             echo "        ${launcher}"' \'
@@ -543,8 +551,8 @@ function genjob {
         # flock - OpenMP
         elif [[ $program == 'flock' ]]; then
 
-            [[ $sched == 'sge' ]] && launcher=''
-		    [[ $sched == 'pbs' ]] && launcher='mpirun -np '"${ncores_per_instance}"
+            [[ $sched == 'sge' ]]
+            [[ $sched == 'pbs' ]]
             [[ $sched == 'slurm' ]] && launcher='srun --nodelist=${nodeid} --exact --hint=nomultithread --distribution=block:block --nodes=1 --ntasks=1 --ntasks-per-node=1 --cpus-per-task='"${ncores_per_instance}"
 
             echo "        ${launcher}"' \'
