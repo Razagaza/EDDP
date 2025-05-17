@@ -1,0 +1,147 @@
+#!/bin/bash
+
+#==================================================================================#
+#                                 monitor_airss                                    #
+#==================================================================================#
+#                                                                                  #
+# This file is part of the ddp-batch package.                                      #
+#                                                                                  #
+# ddp-batch is free software; you can redistribute it and/or                       #
+# modify it under the terms of the GNU General Public License version 2            #
+# as published by the Free Software Foundation                                     #
+#                                                                                  #
+# This program is distributed in the hope that it will be useful,                  #
+# but WITHOUT ANY WARRANTY; without even the implied warranty of                   #
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the                    #
+# GNU General Public License for more details.                                     #
+#                                                                                  #
+# You should have received a copy of the GNU General Public License                #
+# along with this program; if not, write to the Free Software                      #
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.  #
+#                                                                                  #
+#----------------------------------------------------------------------------------#
+# This program monitors crud job                                                   #
+#----------------------------------------------------------------------------------#
+# Written by Se Hun Joo, Copyright (c) 2024                                        #
+#----------------------------------------------------------------------------------#
+#                                                                                  #
+#==================================================================================#
+
+set -e
+
+if [ $# -ne 0 ]; then
+    echo 1>&2 "Usage: $(basename $0)"
+    exit 127
+fi
+
+# Get arguments
+
+
+
+# Check the number of random structure left (./hobber/*.res files)'
+
+echo "    starting crud monitoring ..."
+
+touch ./status.crud
+
+counter=1
+SECONDS=0
+seconds_count=0
+seconds_cryan=0
+until [[ ${counter} -eq 0 ]]
+do
+    seconds_count=$((seconds_count + SECONDS))
+    seconds_cryan=$((seconds_cryan + SECONDS))
+    SECONDS=0
+
+    # Check process (every 5 seconds)
+
+    if [[ $seconds_count -ge 5 ]]; then
+        # hopper
+
+        counter=$(find ./hopper -maxdepth 1 -type f -name "*.res" | sed "/data.res/d" | wc -l)
+
+        # workdir - consider press run of AIRSS
+
+        for f in *-*.cell; do
+            [[ -f "${f%%.cell}.res" ]] && $counter=((counter+1))
+        done
+
+        # good_castep
+
+        ngood=$(ls good_castep/*.res 2> /dev/null | wc -l)
+
+        # bad_castep
+
+        if ls bad_castep/*.res &>/dev/null; then
+            cd ./bad_castep
+            for seed in $(ls *.res | sed 's/.res$//'); do
+                find . -name "$seed.*.err" -size 0 -delete
+                if ls $seed.*.err &>/dev/null; then
+                    pattern='wave_orthonormalise_overlap_wv_ks'
+                    dir='orthonormalise'
+                    [[ $(grep -i "${pattern}" $seed.*.err | wc -l) -gt 0 ]] && mkdir -p $dir && mv $seed.* $dir && continue
+                    pattern='electronic_minimisation of initial cell failed'
+                    dir='scf'
+                    [[ $(grep -i "${pattern}" $seed.*.err | wc -l) -gt 0 ]] && mkdir -p $dir && mv $seed.* $dir && continue
+                    pattern='need to have at least 1 plane wave on each process'
+                    dir='others'
+                    [[ $(grep -i "${pattern}" $seed.*.err | wc -l) -gt 0 ]] && mkdir -p $dir && mv $seed.* $dir && continue
+                elif [[ -f $seed.castep ]]; then
+                    echo $seed
+                    pattern='electronic minimisation did not converge when finding ground state'
+                    dir='scf'
+                    [[ $(grep -i "${pattern}" $seed.castep | wc -l) -gt 0 ]] && mkdir -p $dir && mv $seed.* $dir && continue
+                else
+                    [ ! -f $seed.castep ] && mv $seed.res ../hopper && rm -f $seed.{cell,par,param}
+                fi
+            done
+            cd ../
+        fi
+
+        nbad=$(find ./bad_castep -type f -name "*.res" 2>/dev/null | wc -l)
+        northo=$(ls bad_castep/orthonormalise/*.res 2> /dev/null | wc -l)
+        nscf=$(ls bad_castep/scf/*.res 2> /dev/null | wc -l)
+        nothers=$(ls bad_castep/*.res 2> /dev/null | wc -l)
+        sed -i "/check_time/d"                                                              ./status.crud
+        sed -i "/no. structures/d"                                                          ./status.crud
+        echo "check_time:                   $(date +%Y-%m-%d\ %H:%M:%S)"                 >> ./status.crud
+        echo "no. structures (remaining):   ${counter}"                                  >> ./status.crud
+        echo "no. structures (good):        $ngood"                                      >> ./status.crud
+        echo "no. structures (bad):         $nbad"                                       >> ./status.crud
+        echo "no. structures (bad-detail):  ortho:$northo / scf:$nscf / others:$nothers" >> ./status.crud
+        seconds_count=0
+    fi
+
+    # Print intermediate results (every 60 seconds)
+
+    if [[ $seconds_cryan -ge 60 ]]; then
+        if [[ -d good_castep ]]; then
+            ( cat good_castep/*.res | cryan -l -r 2>/dev/null > ./status.crud.cryan ) </dev/null &>/dev/null &
+        fi
+        seconds_cryan=0
+    fi
+
+
+    if [[ -f ./stopmonitor ]] || [[ -f ./STOP ]]; then
+        echo '    stopping crud monitoring ...'
+        exit 0
+    fi
+
+    rm -f crud.pe* crud.po*
+    find . -name "crud.e*" -size 0 -delete
+    find . -name "crud.o*" -size 0 -delete
+
+    sleep 1
+done
+
+sleep 1
+
+
+# Create a DONE file to signal that the job is done
+
+touch ./done.crud
+
+echo '    crud complete'
+
+exit 0
